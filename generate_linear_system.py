@@ -37,7 +37,7 @@ X_dot = np.stack((x_dot, y_dot), axis=1)
 Theta = np.stack( (x, y), axis=1 )
 
 # %% ADD CODE TO test, then separate in different cells
-def concrete_distr_sample(alpha, beta):
+def concrete_distr_sample(log_alpha, beta):
     """
     Function that samples from concrete distribution with parameter:
     - alpha (probability-related) for the logic gates.
@@ -45,15 +45,15 @@ def concrete_distr_sample(alpha, beta):
     """
 
     # Create u for random gates to be sampled
-    u = tf.random.uniform(shape=alpha.shape,
+    u = tf.random.uniform(shape=log_alpha.shape,
                           minval=1e-15,
                           maxval=1)
 
-    s = tf.math.sigmoid((tf.math.log(alpha) + tf.math.log(u) - tf.math.log(1 - u)) / beta)
+    s = tf.math.sigmoid((log_alpha + tf.math.log(u) - tf.math.log(1 - u)) / beta)
 
     return s
 
-def hard_concrete_distr_sample(alpha, beta=2/3, gamma=-0.1, zeta=1.1):
+def hard_concrete_distr_sample(log_alpha, beta=2/3, gamma=-0.1, zeta=1.1):
     """
     Function that samples, provided alpha parameter of the gates, from the hard concrete distribution
     """
@@ -69,14 +69,14 @@ def hard_concrete_distr_sample(alpha, beta=2/3, gamma=-0.1, zeta=1.1):
         raise("Value \"zeta\" can only be greater or equal one ")
     # END Error handling
 
-    s = concrete_distr_sample(alpha, beta)
+    s = concrete_distr_sample(log_alpha, beta)
     s_bar = s * (zeta - gamma) + gamma
 
     z = tf.math.minimum( 1, tf.math.maximum( 0, s_bar ) )
     return z
 
 # LOSS computation L_0
-def complexity_loss(alpha, beta=2/3, gamma=-0.1, zeta=1.1):
+def complexity_loss(log_alpha, beta=2/3, gamma=-0.1, zeta=1.1):
     """
     Compute the complexity loss as in (Louizos et al., 2018).
         Sigmoid(log(alpha_j) - beta*log(-gamma/zeta))
@@ -90,7 +90,7 @@ def complexity_loss(alpha, beta=2/3, gamma=-0.1, zeta=1.1):
     """
     L_c = tf.reduce_sum(
                 tf.math.sigmoid( 
-                    tf.math.log(alpha) - beta * tf.math.log(-gamma / zeta)
+                    log_alpha - beta * tf.math.log(-gamma / zeta)
                 )
             )
 
@@ -114,7 +114,7 @@ class identification_class(keras.Model):
             initializer="RandomNormal",
             trainable=True,
         )
-        self.alpha = self.add_weight(
+        self.log_alpha = self.add_weight(
             shape=(P,n),
             name="Alpha_params",
             dtype=tf.float32,
@@ -124,14 +124,12 @@ class identification_class(keras.Model):
 
     def call(self, Theta):
         # Add constraint to alpha, which has to be strictly positive
-
-        safe_alpha = tf.clip_by_value(self.alpha, 1e-6, 1e2)
-        z = hard_concrete_distr_sample(alpha=safe_alpha)
+        z = hard_concrete_distr_sample(log_alpha=self.log_alpha)
         Xi_eff = z * self.Xi
 
         res = (tf.matmul(Theta, Xi_eff))
         self.add_loss(
-            0.001 * complexity_loss(alpha=safe_alpha)
+            0.01 * complexity_loss(log_alpha=self.log_alpha)
         )
         return res
 
@@ -140,7 +138,7 @@ model = identification_class(2, 2)
 # %%
 import keras as keras
 opt = keras.optimizers.Adam(1e-2)
-n_epoch = 500
+n_epoch = 100
 for epoch in range(n_epoch):
     with tf.GradientTape() as tape:
         y_pred = model(Theta_tf)
@@ -152,15 +150,9 @@ for epoch in range(n_epoch):
     opt.apply_gradients(zip(grads, model.trainable_variables))
 
 Xi = model.Xi
-alpha = model.alpha
-# %%
-safe_alpha = tf.clip_by_value(alpha, 1e-6, 1e2)
+log_alpha = model.log_alpha
+
 z_hat = tf.math.minimum(1, tf.math.maximum(0,
-            tf.math.sigmoid(tf.math.log(safe_alpha))*(1.1 + 0.1) -0.1))
-z_hat_2 = hard_concrete_distr_sample(alpha=safe_alpha)
-
+            tf.math.sigmoid(log_alpha)*(1.1 + 0.1) -0.1))
 print(z_hat)
-print(z_hat_2)
-print((Xi*safe_alpha))
-
-# %%
+print((Xi*z_hat))
