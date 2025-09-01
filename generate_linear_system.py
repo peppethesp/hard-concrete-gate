@@ -103,10 +103,19 @@ import keras as keras
 X_dot_tf = tf.convert_to_tensor(X_dot, dtype=tf.float32)
 Theta_tf = tf.convert_to_tensor(Theta, dtype=tf.float32)
 
+class alpha_init(keras.Initializer):
+    def __init__(self, init_value):
+        super().__init__()
+        self.init_value = init_value
+
+    def __call__(self, shape, dtype=None):
+        return tf.ones(shape=shape, dtype=dtype)*self.init_value
+
 class identification_class(keras.Model):
     def __init__(self, P, n):
         super().__init__()
         # Trainable coefficient matrix
+        initializer=alpha_init(1.)
         self.Xi = self.add_weight(
             shape=(P,n),
             name="Xi_params",
@@ -118,7 +127,7 @@ class identification_class(keras.Model):
             shape=(P,n),
             name="Alpha_params",
             dtype=tf.float32,
-            initializer="ones",
+            initializer=initializer,
             trainable=True,
         )
 
@@ -127,10 +136,7 @@ class identification_class(keras.Model):
         z = hard_concrete_distr_sample(log_alpha=self.log_alpha)
         Xi_eff = z * self.Xi
 
-        res = (tf.matmul(Theta, Xi_eff))
-        self.add_loss(
-            0.01 * complexity_loss(log_alpha=self.log_alpha)
-        )
+        res = tf.matmul(Theta, Xi_eff)
         return res
 
 model = identification_class(2, 2)
@@ -138,12 +144,35 @@ model = identification_class(2, 2)
 # %%
 import keras as keras
 opt = keras.optimizers.Adam(1e-2)
-n_epoch = 100
+n_epoch = 1000
+lam = 0.001
+warm_up_epoch = 250
+# lambda should start later in the model;
+
+# Monte-Carlo error for finding expected "error loss" L_c 
+def monte_carlo_error(model, X, Y, L=2):
+    Loss = 0
+    for _ in range (L):
+        y_pred = model(X)
+        mse = tf.reduce_mean((y_pred - Y)**2)
+
+        Loss+= mse
+    return Loss/L
+
 for epoch in range(n_epoch):
     with tf.GradientTape() as tape:
-        y_pred = model(Theta_tf)
-        loss = tf.reduce_mean((y_pred - X_dot_tf)**2)
-        loss += sum(model.losses)
+        # Computing Error-Losses L:c
+        mc_loss=monte_carlo_error(model, Theta_tf, X_dot_tf)
+        
+        # Computing Complexity-Losses L_c (regularization losses)
+        if(epoch<warm_up_epoch):
+            eff_lam=0
+        else:
+            eff_lam=lam
+        L_c=complexity_loss(model.log_alpha) * lam
+        # print(mc_loss, L_c)
+
+        loss = mc_loss + L_c
     
     # Compute gradient
     grads = tape.gradient(loss, model.trainable_variables)
@@ -154,5 +183,9 @@ log_alpha = model.log_alpha
 
 z_hat = tf.math.minimum(1, tf.math.maximum(0,
             tf.math.sigmoid(log_alpha)*(1.1 + 0.1) -0.1))
+
+print(log_alpha.numpy())
 print(z_hat)
 print((Xi*z_hat))
+
+# %%
