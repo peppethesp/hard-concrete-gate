@@ -2,37 +2,40 @@
 import numpy as np
 import scipy as sp
 
+# Linear-Nonlinear System to simulate
 def system(Y, t):
     mu = 2.5
     x = Y[0]
     y = Y[1]
     z = Y[2]
     dydt = [
-        (-x - y),
-        (-5*y - z),
-        (-z),
+        (- x - y),
+        (- 5*y - z),
+        (- z),
     ]
     return dydt
-
 t = np.linspace(0, 2, 501)
 dT = t[1] - t[0]
 
 from scipy.integrate import odeint
 y_0 = [1., -1., -3]
 
+# Matrices where to save the data
+# Estimate of differentiation has to be carried out BEFORE building matrices to reduce its error
+n_IC=10         # Number of ICs
 Theta=[]
 X_dot=[]
-for i in range(5):
-    # sol = np.concatenate((sol, odeint(system, y_0, t)), axis=0)
+for i in range(n_IC):
     y_0 = np.random.uniform(size=(3))*10 - 5
     sol=odeint(system, y_0, t)
     
     X_dot.append(np.gradient(sol, dT, axis=0))
     Theta.append(odeint(system, y_0, t))
+# Matrices of the results
 X_dot = np.concatenate(X_dot, axis=0)
 Theta = np.concatenate(Theta, axis=0)
 
-# %%
+# Plot time evolution
 import matplotlib.pyplot as plt
 plt.plot(X_dot)
 
@@ -44,7 +47,7 @@ def concrete_distr_sample(log_alpha, beta):
     - beta (temperature)
     """
 
-    # Create u for random gates to be sampled
+    # Create u matrix for random gates to be sampled
     u = tf.random.uniform(shape=log_alpha.shape,
                           minval=1e-15,
                           maxval=1)
@@ -72,7 +75,8 @@ def hard_concrete_distr_sample(log_alpha, beta=2/3, gamma=-0.1, zeta=1.1):
     s = concrete_distr_sample(log_alpha, beta)
     s_bar = s * (zeta - gamma) + gamma
     z_hard = tf.math.minimum( 1., tf.math.maximum( 0., s_bar ) )
-
+    
+    # Gradient flowing through s_bar to avoid it stopping learning because of zero gradient of the hard_sigmoid
     z = s_bar+tf.stop_gradient(z_hard - s_bar)
     return z
 
@@ -97,25 +101,54 @@ def complexity_loss(log_alpha, beta=2/3, gamma=-0.1, zeta=1.1):
 
     return L_c
 
+def test_time_z_estimator(log_alpha, gamma=1.1, zeta=-0.1):
+    """
+    For the Hard_CONCRETE distribution return the value of the estimated z_hat given:
+    - "log_alpha"
+    - "gamma"
+    - "zeta"
+    """
+    z_hat = tf.math.minimum(1, tf.math.maximum(0,
+                tf.math.sigmoid(log_alpha)*(gamma - zeta) + zeta))
+    return z_hat
+
 # %%
+# MODEL DEFINITION
 import tensorflow as tf
 import keras as keras
 
-X_dot_tf = tf.convert_to_tensor(X_dot, dtype=tf.float32)
-Theta_tf = tf.convert_to_tensor(Theta, dtype=tf.float32)
+class log_alpha_limiter(keras.constraints.Constraint):
+    # Class to limit log_alpha in a specified range
+    def __init__(self, min_value, max_value):
+        super().__init__()
+        self.min_value=min_value
+        self.max_value=max_value
+    
+    def __call__(self, w):
+        return tf.clip_by_value(
+            w,
+            clip_value_min=self.min_value, clip_value_max=self.max_value
+        )
 
 class alpha_init(keras.Initializer):
+    # Custom initializer class to choose the degree of opening of the logic gates
+    # Uniform initializer
     def __init__(self, init_value):
         super().__init__()
         self.init_value = init_value
 
-    def __call__(self, shape, dtype=None):
+    def __call__(self, shape, dtype=tf.float32):
         return tf.ones(shape=shape, dtype=dtype)*self.init_value
 
 class identification_class(keras.Model):
-    def __init__(self, P, n):
+    def __init__(self, P, n, alpha_in, alpha_min, alpha_max, beta=2/3, gamma=1.1, zeta=0.1):
         super().__init__()
-        # Trainable coefficient matrix
+        # Set attributes
+        self.beta=beta
+        self.gamma=gamma
+        self.zeta=zeta
+
+        # Trainable coefficient matrices
         self.Xi = self.add_weight(
             shape=(P,n),
             name="Xi_params",
@@ -124,43 +157,77 @@ class identification_class(keras.Model):
             trainable=True,
         )
 
-        initializer=alpha_init(10.)
+        initializer=alpha_init(alpha_in)
+        log_limiter=log_alpha_limiter(min_value=alpha_min, max_value=alpha_max)
         self.log_alpha = self.add_weight(
             shape=(P,n),
             name="Alpha_params",
             dtype=tf.float32,
             initializer=initializer,
             trainable=True,
+            constraint=log_limiter,
         )
 
+    # Model call
     def call(self, Theta):
         # Add constraint to alpha, which has to be strictly positive
-        z = hard_concrete_distr_sample(log_alpha=self.log_alpha)
+        z = hard_concrete_distr_sample(
+            log_alpha=self.log_alpha,
+            beta=self.beta,
+            gamma=self.gamma,
+            zeta=self.zeta,
+            )
         Xi_eff = z * self.Xi
 
         res = tf.matmul(Theta, Xi_eff)
         return res
 
-model = identification_class(3, 3)
-
 # %%
+# Run the model
 import keras as keras
 opt = keras.optimizers.Adam(1e-2)
-n_epoch = 500
+beta=2/3
+zeta=1.1
+gamma=-0.1
+P=3
+n=3
+n_epoch = 5000
 lam = 0.05
-warm_up_epoch = 00
-# lambda should start later in the model;
+warm_up_epoch = 0       # lambda should start later in the model
+
+model = identification_class(P=P, n=n, alpha_in=-2., alpha_min=-3, alpha_max=10, beta=beta, zeta=zeta, gamma=gamma)
+
+X_dot_tf = tf.convert_to_tensor(X_dot, dtype=tf.float32)
+Theta_tf = tf.convert_to_tensor(Theta, dtype=tf.float32)
 
 # Monte-Carlo error for finding expected "error loss" L_c 
 def monte_carlo_error(model, X, Y, L=2):
+    """
+    Compute the Monte-Carlo LOSS of the system according tha depends on random quantities (inside the "model").
+    The expected value is computed as average among with "L"
+    """
     Loss = 0
     for _ in range (L):
-        y_pred = model(X)
-        mse = tf.reduce_mean((y_pred - Y)**2)
+        Y_pred = model(X)
+        mse = tf.reduce_mean((Y_pred - Y)**2)
 
         Loss+= mse
     return Loss/L
 
+def print_net_params():
+    """
+    Print parameters of the network, especially "log_alpha", the value of the estimated mask "z_hat" and the estimated parameters "Xi"
+    """
+    Xi = model.Xi
+    log_alpha = model.log_alpha
+
+    z_hat = test_time_z_estimator(log_alpha=log_alpha)
+
+    print(log_alpha.numpy())
+    print(z_hat)
+    print((Xi*z_hat))
+
+# Effective Learning of the parameters
 for epoch in range(n_epoch):
     with tf.GradientTape() as tape:
         # Computing Error-Losses L:c
@@ -172,26 +239,21 @@ for epoch in range(n_epoch):
         else:
             eff_lam=lam
         L_c=complexity_loss(model.log_alpha) * lam
-        # print(mc_loss, L_c)
 
         loss = mc_loss + L_c
     
-    # Compute gradient
+    # Compute gradient and learn
     grads = tape.gradient(loss, model.trainable_variables)
     opt.apply_gradients(zip(grads, model.trainable_variables))
 
     if ((epoch + 1) % 50 == 0):
         print(f"Epoch: {epoch+1}: loss = {loss.numpy():.6f}", end="\r")
+    
+    if ((epoch + 1) % 200 == 0):
+        print()
+        print_net_params()
+        print()
 
-Xi = model.Xi
-log_alpha = model.log_alpha
-
-z_hat = tf.math.minimum(1, tf.math.maximum(0,
-            tf.math.sigmoid(log_alpha)*(1.1 + 0.1) -0.1))
-
-print(log_alpha.numpy())
-print(z_hat)
-print((Xi*z_hat))
 
 # %%
 log_alpha = model.log_alpha
