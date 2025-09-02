@@ -1,6 +1,7 @@
 # %%
+# This is an old script; first steps in the learning of mask learning for network parameters. 
+# Script to generate, through numpy, the hard-CONCRETE sampling from a distribution
 import numpy as np
-
 
 def sigmoid(u):
     """
