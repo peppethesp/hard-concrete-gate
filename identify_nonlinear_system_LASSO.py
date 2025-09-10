@@ -53,11 +53,11 @@ lr=1e-2
 P=Theta.shape[-1]
 n=X_dot.shape[-1]
 model = identification_class(P=P, n=n)
-opt = keras.optimizers.Adam(lr)
+
 # %%
 # Run the model
 n_epoch = 5000
-lam = 0.1
+lam = .01
 # Effective Learning of the parameters
 for epoch in range(n_epoch):
     with tf.GradientTape() as tape:
@@ -69,10 +69,9 @@ for epoch in range(n_epoch):
         # Computing Error-Losses L_c
         loss=loss_original(model, Theta_tf, X_dot_tf)
 
-    
     # Compute gradient and learn
-    grads = tape.gradient(loss, model.trainable_variables)
-    opt.apply_gradients(zip(grads, model.trainable_variables))
+    dL_dXi, = tape.gradient(loss, [model.Xi])
+    model.Xi.assign_sub(lr*dL_dXi)
 
     # Apply shrinkage
     # Proximal Gradient Descent
